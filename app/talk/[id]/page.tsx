@@ -14,22 +14,26 @@ export default function FaceToFace() {
   const userLang = searchParams.get('lang') as 'en' | 'es' || 'en'
   const partnerLang = userLang === 'en' ? 'es' : 'en'
   
+  // Connection state
   const [peer, setPeer] = useState<any>(null)
   const [conn, setConn] = useState<any>(null)
   const [status, setStatus] = useState('Initializing...')
   const [isConnected, setIsConnected] = useState(false)
   
+  // Speech state
   const [isListening, setIsListening] = useState(false)
   const [myText, setMyText] = useState('')
   const [myTranslation, setMyTranslation] = useState('')
   const [partnerText, setPartnerText] = useState('')
   const [partnerTranslation, setPartnerTranslation] = useState('')
   
+  // Refs
   const recognitionRef = useRef<any>(null)
   const peerRef = useRef<any>(null)
   const connRef = useRef<any>(null)
   const finalTranscriptRef = useRef('')
   
+  // Initialize PeerJS connection
   useEffect(() => {
     let mounted = true
     
@@ -43,7 +47,8 @@ export default function FaceToFace() {
           config: {
             iceServers: [
               { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' }
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' }
             ]
           }
         }
@@ -54,7 +59,7 @@ export default function FaceToFace() {
           setStatus('Waiting for partner...')
         } else {
           p = new Peer(config)
-          setStatus('Connecting...')
+          setStatus('Connecting to partner...')
         }
         
         peerRef.current = p
@@ -62,10 +67,12 @@ export default function FaceToFace() {
         
         p.on('open', (id: string) => {
           if (!mounted) return
+          console.log('Peer connected with ID:', id)
           
           if (!isHost) {
             setTimeout(() => {
               if (!mounted) return
+              console.log('Guest connecting to host:', roomId)
               const connection = p.connect(roomId, { reliable: true })
               setupConnection(connection)
             }, 1000)
@@ -74,12 +81,13 @@ export default function FaceToFace() {
         
         p.on('connection', (connection: any) => {
           if (!mounted) return
+          console.log('Incoming connection from peer')
           setupConnection(connection)
         })
         
         p.on('error', (err: any) => {
           console.error('Peer error:', err)
-          setStatus('Connection error')
+          setStatus(`Error: ${err.type}`)
         })
         
       } catch (err) {
@@ -93,11 +101,13 @@ export default function FaceToFace() {
       setConn(connection)
       
       connection.on('open', () => {
-        setStatus('Connected')
+        console.log('Data connection open')
+        setStatus('Connected ✓')
         setIsConnected(true)
       })
       
       connection.on('data', (data: any) => {
+        console.log('Received data:', data)
         if (data.type === 'speech') {
           setPartnerText(data.text)
         } else if (data.type === 'translation') {
@@ -106,8 +116,14 @@ export default function FaceToFace() {
       })
       
       connection.on('close', () => {
+        console.log('Connection closed')
         setStatus('Disconnected')
         setIsConnected(false)
+      })
+      
+      connection.on('error', (err: any) => {
+        console.error('Connection error:', err)
+        setStatus('Connection error')
       })
     }
     
@@ -124,12 +140,15 @@ export default function FaceToFace() {
     }
   }, [roomId, isHost])
   
+  // Send data to partner
   const sendToPartner = (type: string, text: string) => {
     if (connRef.current && connRef.current.open) {
       connRef.current.send({ type, text })
+      console.log('Sent:', type, text.substring(0, 50))
     }
   }
   
+  // Translate text
   const translate = async (text: string) => {
     if (!text.trim()) return
     
@@ -154,15 +173,16 @@ export default function FaceToFace() {
     }
   }
   
+  // Start listening
   const startListening = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SpeechRecognition) {
-      alert('Speech recognition requires Chrome or Edge')
+      alert('Speech recognition requires Chrome or Edge browser')
       return
     }
     
     if (!isConnected) {
-      alert('Wait for partner to connect')
+      alert('Wait for partner to connect first')
       return
     }
     
@@ -194,6 +214,7 @@ export default function FaceToFace() {
     }
     
     recognition.onerror = (event: any) => {
+      console.error('Speech error:', event.error)
       if (event.error === 'not-allowed') {
         alert('Microphone permission denied')
       }
@@ -225,42 +246,36 @@ export default function FaceToFace() {
   
   const copyJoinLink = () => {
     const link = `${window.location.origin}/talk/${roomId}?host=false&name=Partner&lang=${partnerLang}`
-    navigator.clipboard.writeText(link)
-    alert('Link copied!')
+    navigator.clipboard.writeText(link).then(() => {
+      alert('Join link copied to clipboard!')
+    }).catch(() => {
+      prompt('Copy this link:', link)
+    })
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#0a0a0f] via-[#0d1117] to-[#0a0a0f] flex flex-col">
-      {/* Top Bar */}
-      <div className="bg-black/40 backdrop-blur border-b border-gray-800 px-6 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
+    <div className="min-h-screen bg-gradient-to-br from-[#0a0a0f] via-[#0d1117] to-[#0a0a0f] p-4">
+      {/* Header */}
+      <div className="max-w-6xl mx-auto mb-4">
+        <div className="flex items-center justify-between mb-4">
           <button
             onClick={() => router.push('/')}
-            className="px-4 py-2 bg-gray-800/80 hover:bg-gray-700 rounded-lg text-white text-sm transition"
+            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-white transition"
           >
             ← Back
           </button>
           
-          <div className="flex items-center gap-6">
-            <div className="text-center">
-              <div className="text-xs text-gray-500 uppercase tracking-wide">Room Code</div>
-              <div className="text-2xl font-mono font-bold text-cyan-400">{roomId}</div>
-            </div>
-            
-            <div className="h-10 w-px bg-gray-700"></div>
-            
-            <div className="text-center">
-              <div className="text-xs text-gray-500 uppercase tracking-wide">Status</div>
-              <div className={`text-lg font-semibold ${isConnected ? 'text-green-400' : 'text-yellow-400'}`}>
-                {isConnected ? '● Connected' : '○ ' + status}
-              </div>
+          <div className="text-center">
+            <div className="text-sm text-gray-500">Room: {roomId}</div>
+            <div className={`text-lg font-semibold ${isConnected ? 'text-green-400' : 'text-yellow-400'}`}>
+              {status}
             </div>
           </div>
           
           {isHost && !isConnected && (
             <button
               onClick={copyJoinLink}
-              className="px-6 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-white font-semibold text-sm transition shadow-lg shadow-cyan-500/20"
+              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-white transition"
             >
               📋 Copy Link
             </button>
@@ -269,99 +284,69 @@ export default function FaceToFace() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex items-center justify-center p-6">
-        <div className="w-full max-w-7xl">
-          <div className="grid lg:grid-cols-2 gap-6">
+      <div className="max-w-6xl mx-auto">
+        <div className="grid md:grid-cols-2 gap-6 mb-6">
+          {/* Your Side */}
+          <div className="bg-[#1a1a2e]/80 backdrop-blur rounded-2xl p-6 border border-cyan-500/30">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-bold text-cyan-400">
+                You ({userName}) - {userLang === 'en' ? 'English 🇺🇸' : 'Español 🇪🇸'}
+              </h3>
+              {isListening && (
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                  <span className="text-red-400 text-sm">Recording</span>
+                </div>
+              )}
+            </div>
             
-            {/* YOU */}
-            <div className="bg-gradient-to-br from-cyan-500/10 to-blue-500/10 backdrop-blur rounded-3xl p-8 border-2 border-cyan-500/30 shadow-2xl">
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                  <h2 className="text-3xl font-bold text-white mb-1">You</h2>
-                  <div className="flex items-center gap-2 text-cyan-400">
-                    <span className="text-4xl">{userLang === 'en' ? '🇺🇸' : '🇪🇸'}</span>
-                    <span className="text-xl font-medium">{userLang === 'en' ? 'English' : 'Español'}</span>
-                  </div>
-                </div>
-                {isListening && (
-                  <div className="flex items-center gap-2 bg-red-500/20 px-4 py-2 rounded-full border border-red-500">
-                    <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-                    <span className="text-red-400 font-semibold">LIVE</span>
-                  </div>
-                )}
-              </div>
-              
-              <div className="space-y-6">
-                <div>
-                  <div className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">What You Said</div>
-                  <div className="bg-black/40 rounded-2xl p-6 min-h-[140px] border border-cyan-500/20">
-                    <p className="text-white text-2xl leading-relaxed">
-                      {myText || <span className="text-gray-600 italic text-lg">Start speaking...</span>}
-                    </p>
-                  </div>
-                </div>
-                
-                <div>
-                  <div className="text-sm font-semibold text-green-400 mb-3 uppercase tracking-wide">
-                    Translation → {partnerLang === 'en' ? 'English' : 'Español'}
-                  </div>
-                  <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 rounded-2xl p-6 min-h-[120px] border border-green-500/30">
-                    <p className="text-green-100 text-xl leading-relaxed">
-                      {myTranslation || <span className="text-gray-600 italic text-base">Translation appears here...</span>}
-                    </p>
-                  </div>
-                </div>
+            <div className="mb-4 min-h-[120px]">
+              <div className="text-sm text-gray-400 mb-2">What you said:</div>
+              <div className="text-white text-lg leading-relaxed">
+                {myText || <span className="text-gray-600 italic">Speak to see text here...</span>}
               </div>
             </div>
+            
+            <div className="pt-4 border-t border-gray-700 min-h-[100px]">
+              <div className="text-sm text-green-400 mb-2">Translation to {partnerLang === 'en' ? 'English' : 'Español'}:</div>
+              <div className="text-green-300 text-lg leading-relaxed">
+                {myTranslation || <span className="text-gray-600 italic">Translation appears here...</span>}
+              </div>
+            </div>
+          </div>
 
-            {/* PARTNER */}
-            <div className="bg-gradient-to-br from-purple-500/10 to-pink-500/10 backdrop-blur rounded-3xl p-8 border-2 border-purple-500/30 shadow-2xl">
-              <div className="mb-6">
-                <h2 className="text-3xl font-bold text-white mb-1">Partner</h2>
-                <div className="flex items-center gap-2 text-purple-400">
-                  <span className="text-4xl">{partnerLang === 'en' ? '🇺🇸' : '🇪🇸'}</span>
-                  <span className="text-xl font-medium">{partnerLang === 'en' ? 'English' : 'Español'}</span>
-                </div>
-              </div>
-              
-              <div className="space-y-6">
-                <div>
-                  <div className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wide">What They Said</div>
-                  <div className="bg-black/40 rounded-2xl p-6 min-h-[140px] border border-purple-500/20">
-                    <p className="text-white text-2xl leading-relaxed">
-                      {partnerText || <span className="text-gray-600 italic text-lg">Listening...</span>}
-                    </p>
-                  </div>
-                </div>
-                
-                <div>
-                  <div className="text-sm font-semibold text-green-400 mb-3 uppercase tracking-wide">
-                    Translation → {userLang === 'en' ? 'English' : 'Español'}
-                  </div>
-                  <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 rounded-2xl p-6 min-h-[120px] border border-green-500/30">
-                    <p className="text-green-100 text-xl leading-relaxed">
-                      {partnerTranslation || <span className="text-gray-600 italic text-base">Translation appears here...</span>}
-                    </p>
-                  </div>
-                </div>
+          {/* Partner Side */}
+          <div className="bg-[#1a1a2e]/80 backdrop-blur rounded-2xl p-6 border border-purple-500/30">
+            <h3 className="text-xl font-bold text-purple-400 mb-4">
+              Partner - {partnerLang === 'en' ? 'English 🇺🇸' : 'Español 🇪🇸'}
+            </h3>
+            
+            <div className="mb-4 min-h-[120px]">
+              <div className="text-sm text-gray-400 mb-2">What they said:</div>
+              <div className="text-white text-lg leading-relaxed">
+                {partnerText || <span className="text-gray-600 italic">Waiting for partner...</span>}
               </div>
             </div>
             
+            <div className="pt-4 border-t border-gray-700 min-h-[100px]">
+              <div className="text-sm text-green-400 mb-2">Translation to {userLang === 'en' ? 'English' : 'Español'}:</div>
+              <div className="text-green-300 text-lg leading-relaxed">
+                {partnerTranslation || <span className="text-gray-600 italic">Translation appears here...</span>}
+              </div>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Bottom Controls */}
-      <div className="bg-black/40 backdrop-blur border-t border-gray-800 px-6 py-6">
-        <div className="max-w-7xl mx-auto flex justify-center gap-4">
+        {/* Controls */}
+        <div className="flex justify-center gap-4">
           {!isListening ? (
             <button
               onClick={startListening}
               disabled={!isConnected}
-              className={`px-12 py-5 rounded-2xl text-white text-xl font-bold transition-all shadow-2xl ${
+              className={`px-8 py-4 rounded-full text-white text-lg font-semibold transition shadow-lg ${
                 isConnected
-                  ? 'bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 shadow-green-500/50 hover:scale-105'
-                  : 'bg-gray-700 cursor-not-allowed opacity-50'
+                  ? 'bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 shadow-green-500/50'
+                  : 'bg-gray-700 cursor-not-allowed'
               }`}
             >
               🎤 Start Speaking
@@ -370,13 +355,13 @@ export default function FaceToFace() {
             <>
               <button
                 onClick={stopListening}
-                className="px-12 py-5 bg-gradient-to-r from-red-500 to-orange-600 hover:from-red-600 hover:to-orange-700 rounded-2xl text-white text-xl font-bold transition-all shadow-2xl shadow-red-500/50 hover:scale-105"
+                className="px-8 py-4 bg-gradient-to-r from-red-500 to-orange-600 hover:from-red-600 hover:to-orange-700 rounded-full text-white text-lg font-semibold transition shadow-lg shadow-red-500/50"
               >
                 ⏹️ Stop
               </button>
               <button
                 onClick={clearAll}
-                className="px-8 py-5 bg-gray-700 hover:bg-gray-600 rounded-2xl text-white text-lg font-semibold transition-all hover:scale-105"
+                className="px-6 py-4 bg-gray-700 hover:bg-gray-600 rounded-full text-white transition"
               >
                 🗑️ Clear
               </button>
