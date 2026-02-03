@@ -542,16 +542,6 @@ function VoxNoteTab() {
           🗑️ Clear
         </button>
       </div>
-
-      {/* WhatsApp Tip */}
-      <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/30">
-        <p className="text-green-400 text-sm font-medium flex items-center gap-2">
-          <span className="text-lg">💡</span> WhatsApp Voice Message Tip
-        </p>
-        <p className="text-gray-400 text-xs mt-2 leading-relaxed">
-          Play the WhatsApp voice message out loud on speaker, then tap the record button here to translate it instantly!
-        </p>
-      </div>
     </div>
   )
 }
