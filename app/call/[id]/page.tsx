@@ -68,6 +68,7 @@ export default function VideoCall() {
   // Debug
   const [logs, setLogs] = useState<string[]>([])
   const [showDebug, setShowDebug] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   // Refs
   const localVideoRef = useRef<HTMLVideoElement>(null)
@@ -491,9 +492,36 @@ export default function VideoCall() {
     }
   }
 
-  const copyLink = () => {
-    const link = `${window.location.origin}/call/${roomId}?host=false&lang=${theirLang}`
-    navigator.clipboard.writeText(link).catch(() => prompt('Copy link:', link))
+  const getShareLink = () => `${window.location.origin}/call/${roomId}?host=false&lang=${theirLang}`
+
+  const copyLink = async () => {
+    const link = getShareLink()
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      prompt('Copy this link:', link)
+    }
+  }
+
+  const shareLink = async () => {
+    const link = getShareLink()
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Join my VoxBridge call',
+          text: 'Join my video call with real-time translation!',
+          url: link
+        })
+      } catch (err: any) {
+        // User cancelled or share failed - fall back to copy
+        if (err.name !== 'AbortError') copyLink()
+      }
+    } else {
+      // Fallback for browsers without Web Share API
+      copyLink()
+    }
   }
 
   const retry = () => {
@@ -669,16 +697,46 @@ export default function VideoCall() {
 
           {/* Share link panel */}
           {isHost && (state === 'ready' || state === 'media') && (
-            <div className="absolute top-16 left-2 right-2 md:left-auto md:right-2 md:w-72 bg-black/90 backdrop-blur rounded-xl p-3 border border-white/10 z-10">
-              <p className="text-white text-sm font-medium mb-2">Invite up to 4 people</p>
-              <div className="flex gap-2">
+            <div className="absolute top-16 left-2 right-2 md:left-auto md:right-2 md:w-80 bg-black/90 backdrop-blur rounded-xl p-4 border border-white/10 z-10">
+              <p className="text-white text-sm font-medium mb-1">Invite up to 4 people</p>
+              <p className="text-gray-400 text-xs mb-3">Share this link to invite others to your call</p>
+              <div className="flex gap-2 mb-3">
                 <input
                   readOnly
-                  value={`${typeof window !== 'undefined' ? window.location.origin : ''}/call/${roomId}?host=false&lang=${theirLang}`}
-                  className="flex-1 bg-white/10 rounded-lg px-2 py-1.5 text-white text-xs border border-white/10"
+                  value={typeof window !== 'undefined' ? getShareLink() : ''}
+                  className="flex-1 bg-white/10 rounded-lg px-3 py-2 text-white text-xs border border-white/10 truncate"
+                  onClick={(e) => (e.target as HTMLInputElement).select()}
                 />
-                <button onClick={copyLink} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white text-black hover:bg-gray-200">
-                  Copy
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={copyLink}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${copied ? 'bg-green-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                >
+                  {copied ? (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                      Copy
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={shareLink}
+                  className="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium bg-blue-500 text-white hover:bg-blue-600 transition-all"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                  </svg>
+                  Share
                 </button>
               </div>
             </div>
@@ -769,6 +827,19 @@ export default function VideoCall() {
       {/* Bottom controls */}
       <div className="p-4 bg-black/90 z-20">
         <div className="flex justify-center items-center gap-3">
+          {/* Share/Invite button */}
+          {isHost && participants.size < 3 && (
+            <button
+              onClick={shareLink}
+              className="w-11 h-11 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-all"
+              title="Invite People"
+            >
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+              </svg>
+            </button>
+          )}
+
           <button onClick={flipCamera} className="w-11 h-11 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center" title="Flip Camera">
             <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
