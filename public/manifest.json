@@ -1,21 +1,62 @@
 {
-  "name": "MachineMind VoxLink™",
+  "name": "VoxLink - Real-Time Translation",
   "short_name": "VoxLink",
-  "description": "Break language barriers instantly - Free real-time voice translation",
+  "description": "Break language barriers instantly. Free real-time voice translation between English and Spanish.",
   "start_url": "/",
   "display": "standalone",
+  "orientation": "portrait-primary",
   "background_color": "#0a0a0f",
-  "theme_color": "#00a3e0",
+  "theme_color": "#06b6d4",
+  "scope": "/",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["communication", "productivity", "utilities"],
   "icons": [
     {
       "src": "/icon-192.png",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
     },
     {
       "src": "/icon-512.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
     }
-  ]
+  ],
+  "screenshots": [
+    {
+      "src": "/opengraph-image",
+      "sizes": "1200x630",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "VoxLink Home Screen"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Start Video Call",
+      "short_name": "Video",
+      "description": "Start a new video call with translation",
+      "url": "/?tab=video",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Start Chat",
+      "short_name": "Chat",
+      "description": "Start a translated chat conversation",
+      "url": "/?tab=talk",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "VoxNote",
+      "short_name": "VoxNote",
+      "description": "Translate voice messages",
+      "url": "/?tab=voxnote",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+  "related_applications": [],
+  "prefer_related_applications": false
 }
