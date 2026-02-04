@@ -3,45 +3,59 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
 
-// Translation cache
 const cache = new Map<string, string>()
 
 interface Message {
   id: string
-  side: 'left' | 'right'
+  sender: string
   original: string
   translated: string
-  lang: 'en' | 'es'
+  fromLang: 'en' | 'es'
+  toLang: 'en' | 'es'
+  timestamp: number
 }
 
-export default function FaceToFaceTalk() {
+export default function ConnectedTalk() {
   const params = useParams()
   const searchParams = useSearchParams()
   const router = useRouter()
 
   const roomId = params.id as string
-  const initialSide = searchParams.get('side') as 'left' | 'right' || 'left'
+  const isHost = searchParams.get('host') === 'true'
+  const userName = searchParams.get('name') || (isHost ? 'You' : 'Partner')
+  const initialLang = (searchParams.get('lang') as 'en' | 'es') || 'en'
 
-  // State
+  // Connection state
+  const [state, setState] = useState<'init' | 'connecting' | 'connected' | 'failed'>('init')
+  const [status, setStatus] = useState('Connecting...')
+  const [partnerName, setPartnerName] = useState('Partner')
+  const [partnerConnected, setPartnerConnected] = useState(false)
+
+  // Language
+  const [myLang, setMyLang] = useState<'en' | 'es'>(initialLang)
+  const theirLang = myLang === 'en' ? 'es' : 'en'
+
+  // Messages
   const [messages, setMessages] = useState<Message[]>([])
-  const [leftLang, setLeftLang] = useState<'en' | 'es'>('en')
-  const [rightLang, setRightLang] = useState<'en' | 'es'>('es')
-  const [activeSide, setActiveSide] = useState<'left' | 'right' | null>(null)
   const [liveText, setLiveText] = useState('')
   const [isListening, setIsListening] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
+  const [isSpeaking, setIsSpeaking] = useState(false)
+
+  // Share
+  const [copied, setCopied] = useState(false)
 
   // Refs
+  const peerRef = useRef<any>(null)
+  const connRef = useRef<any>(null)
   const recRef = useRef<any>(null)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
   const mountedRef = useRef(true)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const langRef = useRef(myLang)
 
-  // Auto-scroll to bottom
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  useEffect(() => { langRef.current = myLang }, [myLang])
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  // Ultra-fast translation
+  // Translation
   const translate = useCallback(async (text: string, from: string, to: string): Promise<string> => {
     if (!text.trim() || from === to) return text
     const key = `${from}>${to}:${text.trim().toLowerCase()}`
@@ -55,54 +69,60 @@ export default function FaceToFaceTalk() {
     } catch { return text }
   }, [])
 
-  // Add message
-  const addMessage = useCallback(async (text: string, side: 'left' | 'right') => {
-    if (!text.trim()) return
+  // Send message to partner
+  const sendToPartner = useCallback((data: any) => {
+    if (connRef.current?.open) {
+      try { connRef.current.send(JSON.stringify(data)) } catch {}
+    }
+  }, [])
 
-    const fromLang = side === 'left' ? leftLang : rightLang
-    const toLang = side === 'left' ? rightLang : leftLang
-    const translated = await translate(text, fromLang, toLang)
+  // Handle speech result
+  const onSpeech = useCallback(async (text: string) => {
+    if (!text.trim()) return
+    const currentLang = langRef.current
+    const targetLang = currentLang === 'en' ? 'es' : 'en'
+    const translated = await translate(text, currentLang, targetLang)
 
     const msg: Message = {
       id: Date.now().toString(),
-      side,
+      sender: userName,
       original: text,
       translated,
-      lang: fromLang
+      fromLang: currentLang,
+      toLang: targetLang,
+      timestamp: Date.now()
     }
 
     setMessages(prev => [...prev, msg])
-  }, [leftLang, rightLang, translate])
+    sendToPartner({ type: 'message', ...msg })
+  }, [userName, translate, sendToPartner])
 
-  // Setup speech recognition for a side
-  const setupSpeech = useCallback((side: 'left' | 'right') => {
-    if (typeof window === 'undefined') return null
-
+  // Speech recognition
+  const setupSpeech = useCallback(() => {
+    if (typeof window === 'undefined') return
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR) return null
+    if (!SR) return
 
-    const lang = side === 'left' ? leftLang : rightLang
     const rec = new SR()
     rec.continuous = true
     rec.interimResults = true
-    rec.lang = lang === 'en' ? 'en-US' : 'es-ES'
+    rec.lang = langRef.current === 'en' ? 'en-US' : 'es-ES'
 
     rec.onstart = () => {
       setIsListening(true)
-      setActiveSide(side)
+      setIsSpeaking(true)
+      sendToPartner({ type: 'speaking', speaking: true })
     }
-
     rec.onend = () => {
       setIsListening(false)
-      setActiveSide(null)
+      setIsSpeaking(false)
       setLiveText('')
+      sendToPartner({ type: 'speaking', speaking: false })
     }
-
     rec.onerror = () => {
       setIsListening(false)
-      setActiveSide(null)
+      setIsSpeaking(false)
     }
-
     rec.onresult = (e: any) => {
       let interim = '', final = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -110,247 +130,362 @@ export default function FaceToFaceTalk() {
         else interim += e.results[i][0].transcript
       }
       setLiveText(interim)
-      if (final) {
-        setLiveText('')
-        addMessage(final, side)
-      }
+      if (final) { setLiveText(''); onSpeech(final) }
     }
+    recRef.current = rec
+  }, [onSpeech, sendToPartner])
 
-    return rec
-  }, [leftLang, rightLang, addMessage])
-
-  // Start listening for a side
-  const startListening = useCallback((side: 'left' | 'right') => {
-    // Stop any existing recognition
-    if (recRef.current) {
-      try { recRef.current.stop() } catch {}
-    }
-
-    const rec = setupSpeech(side)
-    if (rec) {
-      recRef.current = rec
-      try { rec.start() } catch {}
-    }
+  const startListening = useCallback(() => {
+    if (!recRef.current) setupSpeech()
+    try { recRef.current?.start() } catch {}
   }, [setupSpeech])
 
-  // Stop listening
   const stopListening = useCallback(() => {
-    if (recRef.current) {
-      try { recRef.current.stop() } catch {}
-    }
+    try { recRef.current?.stop() } catch {}
     setIsListening(false)
-    setActiveSide(null)
+    setIsSpeaking(false)
     setLiveText('')
   }, [])
 
-  // Swap languages
-  const swapLanguages = useCallback(() => {
-    setLeftLang(rightLang)
-    setRightLang(leftLang)
-  }, [leftLang, rightLang])
+  // Setup connection
+  const setupConnection = useCallback((conn: any) => {
+    connRef.current = conn
 
-  // Cleanup
+    conn.on('open', () => {
+      setPartnerConnected(true)
+      setState('connected')
+      setStatus('Connected!')
+      conn.send(JSON.stringify({ type: 'join', name: userName, lang: myLang }))
+    })
+
+    conn.on('data', (d: string) => {
+      try {
+        const msg = JSON.parse(d)
+        if (msg.type === 'join') {
+          setPartnerName(msg.name || 'Partner')
+        } else if (msg.type === 'message') {
+          // Received message from partner - show their original and translation
+          const received: Message = {
+            id: msg.id,
+            sender: msg.sender,
+            original: msg.original,
+            translated: msg.translated,
+            fromLang: msg.fromLang,
+            toLang: msg.toLang,
+            timestamp: msg.timestamp
+          }
+          setMessages(prev => [...prev, received])
+        } else if (msg.type === 'speaking') {
+          // Partner is speaking - could show indicator
+        }
+      } catch {}
+    })
+
+    conn.on('close', () => {
+      setPartnerConnected(false)
+      setStatus('Partner disconnected')
+    })
+  }, [userName, myLang])
+
+  // Connect via PeerJS
+  const connect = useCallback(async () => {
+    try {
+      setState('connecting')
+      setStatus(isHost ? 'Creating room...' : 'Joining...')
+
+      const Peer = (await import('peerjs')).default
+      const peerId = isHost ? `talk-${roomId}` : `talk-${roomId}-${Date.now()}`
+
+      const peer = new Peer(peerId, {
+        debug: 1,
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'turn:a.relay.metered.ca:80', username: 'e8dd65b92ed50f3a0f709341', credential: 'uWdWNmkhvyqTmFGo' },
+            { urls: 'turn:a.relay.metered.ca:443', username: 'e8dd65b92ed50f3a0f709341', credential: 'uWdWNmkhvyqTmFGo' },
+          ]
+        }
+      })
+
+      peerRef.current = peer
+
+      peer.on('open', () => {
+        if (isHost) {
+          setStatus('Waiting for partner...')
+        } else {
+          setStatus('Connecting to partner...')
+          const conn = peer.connect(`talk-${roomId}`, { reliable: true })
+          setupConnection(conn)
+        }
+      })
+
+      peer.on('connection', (conn) => {
+        setupConnection(conn)
+      })
+
+      peer.on('error', (err: any) => {
+        if (err.type === 'peer-unavailable') {
+          setStatus('Room not found')
+          setState('failed')
+        }
+      })
+    } catch (err: any) {
+      setState('failed')
+      setStatus(`Error: ${err.message}`)
+    }
+  }, [isHost, roomId, setupConnection])
+
   useEffect(() => {
     mountedRef.current = true
+    setupSpeech()
+    connect()
     return () => {
       mountedRef.current = false
-      if (recRef.current) try { recRef.current.stop() } catch {}
+      try { recRef.current?.stop() } catch {}
+      try { connRef.current?.close() } catch {}
+      try { peerRef.current?.destroy() } catch {}
     }
   }, [])
 
+  const getShareLink = () => `${typeof window !== 'undefined' ? window.location.origin : ''}/talk/${roomId}?host=false&lang=${theirLang}`
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(getShareLink())
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      prompt('Copy this link:', getShareLink())
+    }
+  }
+
+  const shareLink = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Join my VoxBridge chat',
+          text: 'Chat with me with real-time translation!',
+          url: getShareLink()
+        })
+      } catch (err: any) {
+        if (err.name !== 'AbortError') copyLink()
+      }
+    } else {
+      copyLink()
+    }
+  }
+
   const goHome = () => {
-    stopListening()
+    try { recRef.current?.stop() } catch {}
+    try { connRef.current?.close() } catch {}
+    try { peerRef.current?.destroy() } catch {}
     router.push('/')
   }
 
-  const clearMessages = () => {
+  const retry = () => {
+    try { connRef.current?.close() } catch {}
+    try { peerRef.current?.destroy() } catch {}
     setMessages([])
-    setShowSettings(false)
+    setState('init')
+    setTimeout(connect, 500)
   }
 
+  // Determine if message is from me
+  const isMyMessage = (msg: Message) => msg.sender === userName
+
   return (
-    <div className="fixed inset-0 bg-gradient-to-b from-gray-900 via-gray-900 to-black flex flex-col">
+    <div className="fixed inset-0 bg-gradient-to-b from-slate-900 via-slate-900 to-black flex flex-col">
       {/* Header */}
-      <div className="p-4 flex items-center justify-between border-b border-white/10">
-        <button onClick={goHome} className="text-white/70 hover:text-white">
+      <div className="p-4 flex items-center justify-between border-b border-white/10 bg-black/30 backdrop-blur">
+        <button onClick={goHome} className="text-white/70 hover:text-white p-2 -ml-2">
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
         </button>
-        <h1 className="text-white font-semibold">Face to Face</h1>
-        <button onClick={() => setShowSettings(!showSettings)} className="text-white/70 hover:text-white">
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-          </svg>
-        </button>
+
+        <div className="text-center">
+          <h1 className="text-white font-semibold">Live Translation</h1>
+          <div className="flex items-center justify-center gap-2 text-xs">
+            <span className={`w-2 h-2 rounded-full ${state === 'connected' ? 'bg-green-500' : state === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
+            <span className="text-white/60">{status}</span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <span className="text-lg">{myLang === 'en' ? '🇺🇸' : '🇪🇸'}</span>
+        </div>
       </div>
 
-      {/* Settings dropdown */}
-      {showSettings && (
-        <div className="absolute top-14 right-4 bg-gray-800 rounded-xl shadow-xl border border-white/10 overflow-hidden z-50">
-          <button
-            onClick={swapLanguages}
-            className="flex items-center gap-3 px-4 py-3 text-white text-sm hover:bg-white/10 w-full"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-            </svg>
-            Swap Languages
-          </button>
-          <button
-            onClick={clearMessages}
-            className="flex items-center gap-3 px-4 py-3 text-red-400 text-sm hover:bg-white/10 w-full"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-            Clear Conversation
-          </button>
+      {/* Share panel - shown when waiting for partner */}
+      {isHost && !partnerConnected && state !== 'failed' && (
+        <div className="mx-4 mt-4 bg-white/5 backdrop-blur rounded-2xl p-4 border border-white/10">
+          <p className="text-white font-medium mb-1">Share with your partner</p>
+          <p className="text-white/60 text-sm mb-3">They'll see your messages translated to {theirLang === 'en' ? 'English' : 'Spanish'}</p>
+
+          <div className="bg-black/30 rounded-xl px-3 py-2 mb-3 overflow-hidden">
+            <p className="text-white/80 text-xs truncate">{typeof window !== 'undefined' ? getShareLink() : ''}</p>
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={copyLink}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-all ${copied ? 'bg-green-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
+            >
+              {copied ? (
+                <>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  Copy
+                </>
+              )}
+            </button>
+            <button
+              onClick={shareLink}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium bg-blue-500 text-white hover:bg-blue-600 transition-all"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+              </svg>
+              Share
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Language indicators */}
-      <div className="flex justify-between items-center px-4 py-3 bg-black/30">
-        <div className="flex items-center gap-2">
-          <span className="text-2xl">{leftLang === 'en' ? '🇺🇸' : '🇪🇸'}</span>
-          <span className="text-white font-medium">{leftLang === 'en' ? 'English' : 'Español'}</span>
-        </div>
-        <button onClick={swapLanguages} className="bg-white/10 hover:bg-white/20 rounded-full p-2 transition-all">
-          <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-          </svg>
-        </button>
-        <div className="flex items-center gap-2">
-          <span className="text-white font-medium">{rightLang === 'en' ? 'English' : 'Español'}</span>
-          <span className="text-2xl">{rightLang === 'en' ? '🇺🇸' : '🇪🇸'}</span>
-        </div>
-      </div>
-
-      {/* Messages area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.length === 0 && (
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4">
+        {messages.length === 0 && partnerConnected && (
           <div className="flex flex-col items-center justify-center h-full text-center px-8">
-            <div className="w-20 h-20 rounded-full bg-white/10 flex items-center justify-center mb-4">
-              <svg className="w-10 h-10 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="w-24 h-24 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center mb-6">
+              <svg className="w-12 h-12 text-white/40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
               </svg>
             </div>
-            <h2 className="text-white text-xl font-semibold mb-2">Ready to Translate</h2>
-            <p className="text-white/60 text-sm max-w-xs">
-              Tap and hold either button below to speak. Your words will be translated instantly for the other person.
+            <h2 className="text-white text-2xl font-semibold mb-2">Connected with {partnerName}</h2>
+            <p className="text-white/50 text-base max-w-xs">
+              Hold the microphone button to speak. Your partner will see the translation instantly.
             </p>
           </div>
         )}
 
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`flex ${msg.side === 'right' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                msg.side === 'left'
-                  ? 'bg-blue-500 text-white rounded-bl-none'
-                  : 'bg-emerald-500 text-white rounded-br-none'
-              }`}
-            >
-              <p className="text-base font-medium">{msg.original}</p>
-              <div className={`mt-2 pt-2 border-t ${msg.side === 'left' ? 'border-blue-400/50' : 'border-emerald-400/50'}`}>
-                <p className="text-sm opacity-90">{msg.translated}</p>
-              </div>
-              <p className="text-xs opacity-60 mt-1">
-                {msg.lang === 'en' ? '🇺🇸' : '🇪🇸'} → {msg.lang === 'en' ? '🇪🇸' : '🇺🇸'}
-              </p>
-            </div>
-          </div>
-        ))}
-
-        {/* Live transcription */}
-        {liveText && activeSide && (
-          <div className={`flex ${activeSide === 'right' ? 'justify-end' : 'justify-start'}`}>
-            <div
-              className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                activeSide === 'left'
-                  ? 'bg-blue-500/60 text-white rounded-bl-none'
-                  : 'bg-emerald-500/60 text-white rounded-br-none'
-              }`}
-            >
-              <p className="text-base">{liveText}</p>
-              <p className="text-xs opacity-60 mt-1 flex items-center gap-1">
-                <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
-                Listening...
-              </p>
-            </div>
+        {messages.length === 0 && !partnerConnected && state !== 'failed' && !isHost && (
+          <div className="flex flex-col items-center justify-center h-full">
+            <div className="w-16 h-16 border-4 border-white/20 border-t-blue-500 rounded-full animate-spin mb-4" />
+            <p className="text-white/60">Connecting...</p>
           </div>
         )}
+
+        {/* Message list */}
+        <div className="space-y-4">
+          {messages.map((msg) => {
+            const isMine = isMyMessage(msg)
+            return (
+              <div key={msg.id} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] ${isMine ? 'items-end' : 'items-start'}`}>
+                  {/* Sender name */}
+                  <p className={`text-xs text-white/40 mb-1 ${isMine ? 'text-right' : 'text-left'}`}>
+                    {isMine ? 'You' : partnerName}
+                  </p>
+
+                  {/* Message bubble */}
+                  <div className={`rounded-2xl overflow-hidden ${
+                    isMine
+                      ? 'bg-blue-500 rounded-br-md'
+                      : 'bg-white/10 rounded-bl-md'
+                  }`}>
+                    {/* Original text (smaller, at top) */}
+                    <div className={`px-4 pt-3 pb-2 ${isMine ? 'bg-blue-600/50' : 'bg-white/5'}`}>
+                      <p className={`text-sm ${isMine ? 'text-blue-100' : 'text-white/60'}`}>
+                        {msg.fromLang === 'en' ? '🇺🇸' : '🇪🇸'} {msg.original}
+                      </p>
+                    </div>
+
+                    {/* Translated text (larger, prominent) */}
+                    <div className="px-4 py-3">
+                      <p className={`text-xl font-medium ${isMine ? 'text-white' : 'text-white'}`}>
+                        {msg.toLang === 'en' ? '🇺🇸' : '🇪🇸'} {msg.translated}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+
+          {/* Live typing indicator */}
+          {liveText && (
+            <div className="flex justify-end">
+              <div className="max-w-[85%]">
+                <p className="text-xs text-white/40 mb-1 text-right">You</p>
+                <div className="bg-blue-500/50 rounded-2xl rounded-br-md px-4 py-3">
+                  <p className="text-white">{liveText}</p>
+                  <p className="text-xs text-blue-200 mt-1 flex items-center gap-1">
+                    <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
+                    Listening...
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
 
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Bottom buttons - Two large push-to-talk buttons */}
-      <div className="p-4 pb-8 bg-gradient-to-t from-black to-transparent">
-        <div className="flex gap-4">
-          {/* Left side button */}
-          <button
-            onTouchStart={() => startListening('left')}
-            onTouchEnd={stopListening}
-            onMouseDown={() => startListening('left')}
-            onMouseUp={stopListening}
-            onMouseLeave={stopListening}
-            className={`flex-1 py-6 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all active:scale-95 ${
-              activeSide === 'left'
-                ? 'bg-blue-500 shadow-lg shadow-blue-500/50'
-                : 'bg-blue-500/20 hover:bg-blue-500/30'
-            }`}
-          >
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
-              activeSide === 'left' ? 'bg-white/20 animate-pulse' : 'bg-white/10'
-            }`}>
-              <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V21h2v-3.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/>
-              </svg>
-            </div>
-            <span className="text-white font-medium text-sm">
-              {leftLang === 'en' ? '🇺🇸 English' : '🇪🇸 Español'}
-            </span>
-            <span className="text-white/50 text-xs">
-              {activeSide === 'left' ? 'Release to send' : 'Hold to speak'}
-            </span>
-          </button>
-
-          {/* Right side button */}
-          <button
-            onTouchStart={() => startListening('right')}
-            onTouchEnd={stopListening}
-            onMouseDown={() => startListening('right')}
-            onMouseUp={stopListening}
-            onMouseLeave={stopListening}
-            className={`flex-1 py-6 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all active:scale-95 ${
-              activeSide === 'right'
-                ? 'bg-emerald-500 shadow-lg shadow-emerald-500/50'
-                : 'bg-emerald-500/20 hover:bg-emerald-500/30'
-            }`}
-          >
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
-              activeSide === 'right' ? 'bg-white/20 animate-pulse' : 'bg-white/10'
-            }`}>
-              <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V21h2v-3.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/>
-              </svg>
-            </div>
-            <span className="text-white font-medium text-sm">
-              {rightLang === 'en' ? '🇺🇸 English' : '🇪🇸 Español'}
-            </span>
-            <span className="text-white/50 text-xs">
-              {activeSide === 'right' ? 'Release to send' : 'Hold to speak'}
-            </span>
+      {/* Failed state */}
+      {state === 'failed' && (
+        <div className="absolute inset-0 bg-black/80 backdrop-blur flex flex-col items-center justify-center z-20">
+          <p className="text-white text-xl font-medium mb-4">{status}</p>
+          <button onClick={retry} className="px-8 py-3 bg-white text-black rounded-full font-medium hover:bg-gray-200">
+            Try Again
           </button>
         </div>
+      )}
 
-        {/* Instructions */}
-        <p className="text-center text-white/40 text-xs mt-4">
-          Place device between you • Each person taps their side to speak
-        </p>
+      {/* Bottom - Push to talk */}
+      <div className="p-6 bg-gradient-to-t from-black via-black/80 to-transparent">
+        {partnerConnected ? (
+          <div className="flex flex-col items-center">
+            {/* Large microphone button */}
+            <button
+              onTouchStart={startListening}
+              onTouchEnd={stopListening}
+              onMouseDown={startListening}
+              onMouseUp={stopListening}
+              onMouseLeave={stopListening}
+              className={`w-20 h-20 rounded-full flex items-center justify-center transition-all active:scale-95 ${
+                isListening
+                  ? 'bg-blue-500 shadow-lg shadow-blue-500/50 scale-110'
+                  : 'bg-white/10 hover:bg-white/20'
+              }`}
+            >
+              <svg className={`w-10 h-10 ${isListening ? 'text-white' : 'text-white/80'}`} fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V21h2v-3.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/>
+              </svg>
+            </button>
+
+            <p className="text-white/50 text-sm mt-4">
+              {isListening ? 'Release to send' : 'Hold to speak'}
+            </p>
+
+            <p className="text-white/30 text-xs mt-2">
+              Speaking {myLang === 'en' ? 'English' : 'Spanish'} → {theirLang === 'en' ? 'English' : 'Spanish'}
+            </p>
+          </div>
+        ) : (
+          <div className="text-center">
+            <p className="text-white/50">Waiting for partner to connect...</p>
+          </div>
+        )}
       </div>
     </div>
   )

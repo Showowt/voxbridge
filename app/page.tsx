@@ -767,11 +767,11 @@ function HomeContent() {
                 <div className="mb-5 p-3 rounded-xl bg-gray-800/50 text-center">
                   {activeTab === 'video' ? (
                     <p className="text-gray-300 text-sm">
-                      <span className="text-cyan-400 font-medium">Video Call:</span> Remote calls with live translation
+                      <span className="text-cyan-400 font-medium">Video Call:</span> Video calls with live subtitles
                     </p>
                   ) : (
                     <p className="text-gray-300 text-sm">
-                      <span className="text-cyan-400 font-medium">Face-to-Face:</span> Sit with someone, each uses their phone
+                      <span className="text-cyan-400 font-medium">Live Chat:</span> Text conversation with instant translation
                     </p>
                   )}
                 </div>
