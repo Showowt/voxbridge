@@ -70,7 +70,7 @@ export default function VideoCall() {
   const [showDebug, setShowDebug] = useState(false)
   const [copied, setCopied] = useState(false)
 
-  // Refs
+  // Refs - use refs for values needed in callbacks to avoid stale closures
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
   const peerRef = useRef<any>(null)
@@ -83,8 +83,14 @@ export default function VideoCall() {
   const langRef = useRef(myLang)
   const logEndRef = useRef<HTMLDivElement>(null)
   const subTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const stateRef = useRef<State>('init')
+  const mutedRef = useRef(false)
+  const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
+  // Keep refs in sync with state
   useEffect(() => { langRef.current = myLang }, [myLang])
+  useEffect(() => { stateRef.current = state }, [state])
+  useEffect(() => { mutedRef.current = muted }, [muted])
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [log])
 
   const dbg = useCallback((m: string) => {
@@ -109,18 +115,23 @@ export default function VideoCall() {
     '2xl': 'text-xl'
   }[textSize]
 
-  // ICE servers
+  // ICE servers - comprehensive list for reliability
   const iceServers = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
+    // Metered TURN servers
     { urls: 'turn:a.relay.metered.ca:80', username: 'e8dd65b92ed50f3a0f709341', credential: 'uWdWNmkhvyqTmFGo' },
     { urls: 'turn:a.relay.metered.ca:80?transport=tcp', username: 'e8dd65b92ed50f3a0f709341', credential: 'uWdWNmkhvyqTmFGo' },
     { urls: 'turn:a.relay.metered.ca:443', username: 'e8dd65b92ed50f3a0f709341', credential: 'uWdWNmkhvyqTmFGo' },
     { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'e8dd65b92ed50f3a0f709341', credential: 'uWdWNmkhvyqTmFGo' },
+    // OpenRelay public TURN
     { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   ]
 
   // Translation
@@ -156,12 +167,16 @@ export default function VideoCall() {
 
   // Broadcast to all peers
   const broadcast = useCallback((data: any) => {
-    connectionsRef.current.forEach((conn) => {
+    connectionsRef.current.forEach((conn, peerId) => {
       if (conn?.open) {
-        try { conn.send(JSON.stringify(data)) } catch {}
+        try {
+          conn.send(JSON.stringify(data))
+        } catch (e) {
+          dbg(`Broadcast error to ${peerId}: ${e}`)
+        }
       }
     })
-  }, [])
+  }, [dbg])
 
   // Handle speech
   const onSpeech = useCallback(async (text: string) => {
@@ -190,11 +205,14 @@ export default function VideoCall() {
     rec.onstart = () => setIsListening(true)
     rec.onend = () => {
       setIsListening(false)
-      if (mountedRef.current && state === 'connected' && !muted) {
+      // Use refs to avoid stale closure
+      if (mountedRef.current && stateRef.current === 'connected' && !mutedRef.current) {
         setTimeout(() => { try { rec.start() } catch {} }, 100)
       }
     }
-    rec.onerror = () => {}
+    rec.onerror = (e: any) => {
+      dbg(`Speech error: ${e.error}`)
+    }
     rec.onresult = (e: any) => {
       let interim = '', final = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -205,7 +223,7 @@ export default function VideoCall() {
       if (final) { setLiveText(''); onSpeech(final) }
     }
     recRef.current = rec
-  }, [state, muted, dbg, onSpeech])
+  }, [dbg, onSpeech])
 
   const toggleRec = useCallback((on: boolean) => {
     if (!recRef.current) setupSpeech()
@@ -226,12 +244,12 @@ export default function VideoCall() {
     }
     broadcast({ type: 'lang', speaker: userName, lang: newLang })
     setTimeout(() => {
-      if (state === 'connected' && !muted) {
+      if (stateRef.current === 'connected' && !mutedRef.current) {
         setupSpeech()
         toggleRec(true)
       }
     }, 300)
-  }, [dbg, broadcast, userName, state, muted, setupSpeech, toggleRec])
+  }, [dbg, broadcast, userName, setupSpeech, toggleRec])
 
   // Get stream
   const getStream = useCallback(async (facing: 'user' | 'environment') => {
@@ -247,21 +265,17 @@ export default function VideoCall() {
     dbg(`Flipping to ${newFacing}`)
 
     try {
-      // Get new stream
       const newStream = await getStream(newFacing)
       const newVideoTrack = newStream.getVideoTracks()[0]
 
-      // Stop old video track
       streamRef.current?.getVideoTracks().forEach(t => t.stop())
 
-      // Update local video
       if (localVideoRef.current && streamRef.current) {
         const audioTrack = streamRef.current.getAudioTracks()[0]
         streamRef.current = new MediaStream(audioTrack ? [newVideoTrack, audioTrack] : [newVideoTrack])
         localVideoRef.current.srcObject = streamRef.current
       }
 
-      // Replace track in all calls
       callsRef.current.forEach((call) => {
         if (call?.peerConnection) {
           const senders = call.peerConnection.getSenders()
@@ -277,18 +291,28 @@ export default function VideoCall() {
     }
   }, [facingMode, getStream, dbg])
 
-  // Setup data connection
+  // Setup data connection with error handling
   const setupConn = useCallback((conn: any, peerId: string, peerName: string) => {
+    dbg(`Setting up connection to ${peerName} (${peerId})`)
     connectionsRef.current.set(peerId, conn)
 
     conn.on('open', () => {
       dbg(`Data channel open: ${peerName}`)
-      conn.send(JSON.stringify({ type: 'join', name: userName, lang: myLang }))
+      // Clear connection timeout if it was set
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current)
+        connectionTimeoutRef.current = null
+      }
+      try {
+        conn.send(JSON.stringify({ type: 'join', name: userName, lang: langRef.current }))
+      } catch (e) {
+        dbg(`Error sending join: ${e}`)
+      }
     })
 
     conn.on('data', (d: string) => {
       try {
-        const msg = JSON.parse(d)
+        const msg = typeof d === 'string' ? JSON.parse(d) : d
         if (msg.type === 'sub') {
           addToLog(msg.speaker, msg.text, msg.trans)
           setActiveSpeaker(msg.speaker)
@@ -307,7 +331,9 @@ export default function VideoCall() {
           setActiveSpeaker(msg.speaker)
           setTimeout(() => setActiveSpeaker(null), 1000)
         }
-      } catch {}
+      } catch (e) {
+        dbg(`Data parse error: ${e}`)
+      }
     })
 
     conn.on('close', () => {
@@ -319,10 +345,15 @@ export default function VideoCall() {
         return updated
       })
     })
-  }, [dbg, userName, myLang, addToLog])
+
+    conn.on('error', (err: any) => {
+      dbg(`Connection error with ${peerName}: ${err}`)
+    })
+  }, [dbg, userName, addToLog])
 
   // Add participant
   const addParticipant = useCallback((peerId: string, name: string, stream: MediaStream | null) => {
+    dbg(`Adding participant: ${name} (${peerId})`)
     setParticipants(prev => {
       const updated = new Map(prev)
       updated.set(peerId, {
@@ -335,9 +366,9 @@ export default function VideoCall() {
       })
       return updated
     })
-  }, [])
+  }, [dbg])
 
-  // Main connect
+  // Main connect function
   const connect = useCallback(async () => {
     if (!mountedRef.current) return
 
@@ -357,82 +388,160 @@ export default function VideoCall() {
       setStatus(isHost ? 'Creating room...' : 'Joining room...')
 
       const Peer = (await import('peerjs')).default
-      const peerId = isHost ? roomId : `${roomId}-${Date.now()}`
+      const peerId = isHost ? roomId : `${roomId}-guest-${Date.now()}`
+
+      dbg(`Creating peer with ID: ${peerId}`)
 
       const peer = new Peer(peerId, {
         debug: 2,
-        config: { iceServers, iceCandidatePoolSize: 10, iceTransportPolicy: 'all' }
+        config: {
+          iceServers,
+          iceCandidatePoolSize: 10,
+          iceTransportPolicy: 'all'
+        }
       })
 
       peerRef.current = peer
 
       peer.on('open', (id) => {
-        dbg(`Peer ID: ${id}`)
+        dbg(`Peer open with ID: ${id}`)
 
         if (isHost) {
           setStatus('Waiting for guests...')
           setState('ready')
         } else {
-          setStatus('Connecting...')
+          // Guest connecting to host
+          setStatus('Connecting to host...')
           setState('connecting')
 
-          dbg(`Connecting to host ${roomId}...`)
-          const conn = peer.connect(roomId, { reliable: true, serialization: 'json' })
+          dbg(`Attempting to connect to host: ${roomId}`)
+
+          // Set connection timeout
+          connectionTimeoutRef.current = setTimeout(() => {
+            if (stateRef.current === 'connecting') {
+              dbg('Connection timeout - retrying...')
+              if (retriesRef.current < 3) {
+                retriesRef.current++
+                setStatus(`Retrying (${retriesRef.current}/3)...`)
+                peer.destroy()
+                setTimeout(connect, 1000)
+              } else {
+                setStatus('Could not connect to host')
+                setState('failed')
+              }
+            }
+          }, 15000)
+
+          // Establish data connection
+          const conn = peer.connect(roomId, { reliable: true })
           setupConn(conn, roomId, 'Host')
 
+          // Make the call
           const call = peer.call(roomId, stream)
           if (call) {
+            dbg('Call initiated to host')
             callsRef.current.set(roomId, call)
+
             call.on('stream', (remoteStream) => {
-              dbg('Got host video!')
+              dbg('Received host stream!')
+              if (connectionTimeoutRef.current) {
+                clearTimeout(connectionTimeoutRef.current)
+                connectionTimeoutRef.current = null
+              }
               addParticipant(roomId, 'Host', remoteStream)
               setState('connected')
               setStatus('Connected!')
               toggleRec(true)
             })
-            call.on('close', () => dbg('Host call ended'))
+
+            call.on('close', () => {
+              dbg('Host call closed')
+              setParticipants(prev => {
+                const updated = new Map(prev)
+                updated.delete(roomId)
+                return updated
+              })
+            })
+
+            call.on('error', (err: any) => {
+              dbg(`Call error: ${err}`)
+            })
+          } else {
+            dbg('Failed to create call')
           }
         }
       })
 
-      // Handle incoming connections (for group calls)
+      // Handle incoming connections (host receives these)
       peer.on('connection', (conn) => {
-        const peerId = conn.peer
-        dbg(`Incoming connection: ${peerId}`)
-        setupConn(conn, peerId, `Guest-${participants.size + 1}`)
+        const incomingPeerId = conn.peer
+        dbg(`Incoming data connection from: ${incomingPeerId}`)
+        setupConn(conn, incomingPeerId, `Guest`)
       })
 
+      // Handle incoming calls (host receives these)
       peer.on('call', (call) => {
-        dbg('Incoming call - answering')
-        call.answer(stream)
         const callerId = call.peer
+        dbg(`Incoming call from: ${callerId}`)
+
+        // Answer with our stream
+        call.answer(stream)
         callsRef.current.set(callerId, call)
 
         call.on('stream', (remoteStream) => {
-          dbg(`Got stream from ${callerId}`)
-          addParticipant(callerId, `Guest-${participants.size + 1}`, remoteStream)
-          if (state !== 'connected') {
+          dbg(`Received stream from: ${callerId}`)
+          addParticipant(callerId, `Guest`, remoteStream)
+
+          if (stateRef.current !== 'connected') {
             setState('connected')
             setStatus('Connected!')
             toggleRec(true)
           }
         })
+
         call.on('close', () => {
           dbg(`Call ended: ${callerId}`)
           callsRef.current.delete(callerId)
+          setParticipants(prev => {
+            const updated = new Map(prev)
+            updated.delete(callerId)
+            return updated
+          })
+        })
+
+        call.on('error', (err: any) => {
+          dbg(`Call error from ${callerId}: ${err}`)
         })
       })
 
       peer.on('disconnected', () => {
-        dbg('Disconnected - reconnecting...')
-        if (mountedRef.current && state !== 'failed') peer.reconnect()
+        dbg('Peer disconnected from server')
+        if (mountedRef.current && stateRef.current !== 'failed') {
+          dbg('Attempting to reconnect...')
+          peer.reconnect()
+        }
       })
 
       peer.on('error', (err: any) => {
-        dbg(`Peer error: ${err.type}`)
+        dbg(`Peer error: ${err.type} - ${err.message}`)
+
+        if (connectionTimeoutRef.current) {
+          clearTimeout(connectionTimeoutRef.current)
+          connectionTimeoutRef.current = null
+        }
+
         if (err.type === 'peer-unavailable') {
-          setStatus('Room not found')
-          setState('failed')
+          if (retriesRef.current < 3) {
+            retriesRef.current++
+            setStatus(`Host not found. Retrying (${retriesRef.current}/3)...`)
+            setTimeout(() => {
+              peer.destroy()
+              connect()
+            }, 2000)
+          } else {
+            setStatus('Host not found. Check the link.')
+            setState('failed')
+          }
         } else if (err.type === 'unavailable-id') {
           if (retriesRef.current < 3) {
             retriesRef.current++
@@ -442,14 +551,18 @@ export default function VideoCall() {
             setStatus('Room unavailable')
             setState('failed')
           }
-        } else if ((err.type === 'network' || err.type === 'server-error') && retriesRef.current < 5) {
+        } else if ((err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') && retriesRef.current < 5) {
           retriesRef.current++
-          setStatus(`Reconnecting (${retriesRef.current}/5)...`)
+          setStatus(`Connection issue. Retrying (${retriesRef.current}/5)...`)
           setTimeout(() => { peer.destroy(); connect() }, 2000)
         } else {
-          setStatus(`Error: ${err.type}`)
+          setStatus(`Connection error`)
           setState('failed')
         }
+      })
+
+      peer.on('close', () => {
+        dbg('Peer connection closed')
       })
 
     } catch (err: any) {
@@ -457,21 +570,31 @@ export default function VideoCall() {
       setState('failed')
       setStatus(err.name === 'NotAllowedError' ? 'Camera access denied' : `Error: ${err.message}`)
     }
-  }, [isHost, roomId, iceServers, facingMode, dbg, getStream, setupConn, addParticipant, toggleRec, state, participants.size])
+  }, [isHost, roomId, facingMode, dbg, getStream, setupConn, addParticipant, toggleRec])
 
   const cleanup = useCallback(() => {
+    dbg('Cleaning up...')
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current)
+      connectionTimeoutRef.current = null
+    }
     try { recRef.current?.stop() } catch {}
     connectionsRef.current.forEach(c => { try { c.close() } catch {} })
     callsRef.current.forEach(c => { try { c.close() } catch {} })
+    connectionsRef.current.clear()
+    callsRef.current.clear()
     try { peerRef.current?.destroy() } catch {}
     streamRef.current?.getTracks().forEach(t => t.stop())
-  }, [])
+  }, [dbg])
 
   useEffect(() => {
     mountedRef.current = true
     setupSpeech()
     connect()
-    return () => { mountedRef.current = false; cleanup() }
+    return () => {
+      mountedRef.current = false
+      cleanup()
+    }
   }, [])
 
   const toggleMute = () => {
@@ -480,7 +603,7 @@ export default function VideoCall() {
       audio.enabled = !audio.enabled
       setMuted(!audio.enabled)
       if (!audio.enabled) toggleRec(false)
-      else if (state === 'connected') toggleRec(true)
+      else if (stateRef.current === 'connected') toggleRec(true)
     }
   }
 
@@ -510,16 +633,14 @@ export default function VideoCall() {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: 'Join my VoxBridge call',
+          title: 'Join my VoxLink call',
           text: 'Join my video call with real-time translation!',
           url: link
         })
       } catch (err: any) {
-        // User cancelled or share failed - fall back to copy
         if (err.name !== 'AbortError') copyLink()
       }
     } else {
-      // Fallback for browsers without Web Share API
       copyLink()
     }
   }
@@ -624,7 +745,7 @@ export default function VideoCall() {
 
       {/* Debug panel */}
       {showDebug && (
-        <div className="absolute top-10 left-2 right-2 z-30 bg-black/95 rounded-lg p-2 max-h-32 overflow-y-auto text-xs font-mono">
+        <div className="absolute top-10 left-2 right-2 z-30 bg-black/95 rounded-lg p-2 max-h-40 overflow-y-auto text-xs font-mono">
           {logs.map((l, i) => <div key={i} className="text-green-400">{l}</div>)}
         </div>
       )}
@@ -657,11 +778,18 @@ export default function VideoCall() {
             {participantCount === 0 && state !== 'connected' && (
               <div className="flex flex-col items-center justify-center bg-gray-900 rounded-lg">
                 <div className="w-20 h-20 rounded-full bg-gray-800 flex items-center justify-center mb-4">
-                  <svg className="w-10 h-10 text-gray-600" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
-                  </svg>
+                  {state === 'connecting' ? (
+                    <div className="w-10 h-10 border-4 border-white/20 border-t-blue-500 rounded-full animate-spin" />
+                  ) : (
+                    <svg className="w-10 h-10 text-gray-600" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                    </svg>
+                  )}
                 </div>
                 <p className="text-white">{status}</p>
+                {state === 'connecting' && (
+                  <p className="text-gray-500 text-xs mt-2">This may take a few seconds...</p>
+                )}
               </div>
             )}
           </div>
@@ -763,6 +891,7 @@ export default function VideoCall() {
           {state === 'failed' && (
             <div className="absolute inset-0 bg-black/80 backdrop-blur flex flex-col items-center justify-center z-20">
               <p className="text-white text-xl font-medium mb-2">{status}</p>
+              <p className="text-gray-400 text-sm mb-4">Make sure the host has started the call</p>
               <button onClick={retry} className="px-8 py-3 bg-white text-black rounded-full font-medium hover:bg-gray-200">
                 Retry
               </button>
