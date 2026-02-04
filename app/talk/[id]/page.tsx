@@ -1,157 +1,223 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
+
+type ConnectionStatus = 'initializing' | 'waiting' | 'connecting' | 'connected' | 'error'
 
 export default function FaceToFace() {
   const params = useParams()
   const searchParams = useSearchParams()
   const router = useRouter()
-  
+
   const roomId = params.id as string
   const isHost = searchParams.get('host') === 'true'
   const userName = searchParams.get('name') || 'User'
   const userLang = searchParams.get('lang') as 'en' | 'es' || 'en'
   const partnerLang = userLang === 'en' ? 'es' : 'en'
-  
+
   // Connection state
-  const [peer, setPeer] = useState<any>(null)
-  const [conn, setConn] = useState<any>(null)
-  const [status, setStatus] = useState('Initializing...')
+  const [status, setStatus] = useState<ConnectionStatus>('initializing')
+  const [statusMessage, setStatusMessage] = useState('Initializing...')
   const [isConnected, setIsConnected] = useState(false)
-  
+
   // Speech state
   const [isListening, setIsListening] = useState(false)
   const [myText, setMyText] = useState('')
   const [myTranslation, setMyTranslation] = useState('')
   const [partnerText, setPartnerText] = useState('')
   const [partnerTranslation, setPartnerTranslation] = useState('')
-  
+  const [copySuccess, setCopySuccess] = useState(false)
+
   // Refs
   const recognitionRef = useRef<any>(null)
   const peerRef = useRef<any>(null)
   const connRef = useRef<any>(null)
   const finalTranscriptRef = useRef('')
-  
+  const mountedRef = useRef(true)
+  const isListeningRef = useRef(false)
+
+  // Keep ref in sync
+  useEffect(() => {
+    isListeningRef.current = isListening
+  }, [isListening])
+
+  // TURN servers config (same as call page)
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    {
+      urls: 'turn:a.relay.metered.ca:80',
+      username: 'e8dd65b92ed50f3a0f709341',
+      credential: 'uWdWNmkhvyqTmFGo'
+    },
+    {
+      urls: 'turn:a.relay.metered.ca:80?transport=tcp',
+      username: 'e8dd65b92ed50f3a0f709341',
+      credential: 'uWdWNmkhvyqTmFGo'
+    },
+    {
+      urls: 'turn:a.relay.metered.ca:443',
+      username: 'e8dd65b92ed50f3a0f709341',
+      credential: 'uWdWNmkhvyqTmFGo'
+    },
+    {
+      urls: 'turn:a.relay.metered.ca:443?transport=tcp',
+      username: 'e8dd65b92ed50f3a0f709341',
+      credential: 'uWdWNmkhvyqTmFGo'
+    }
+  ]
+
+  const log = useCallback((msg: string) => {
+    console.log(`[VoxLink Talk] ${msg}`)
+  }, [])
+
   // Initialize PeerJS connection
   useEffect(() => {
-    let mounted = true
-    
+    mountedRef.current = true
+
     const init = async () => {
       try {
+        setStatus('initializing')
+        setStatusMessage('Setting up connection...')
+
         const { default: Peer } = await import('peerjs')
-        
-        const config = {
-          host: 'voxlink-peer.herokuapp.com',
-          secure: true,
+
+        const peerConfig: any = {
           config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' },
-              { urls: 'stun:stun2.l.google.com:19302' }
-            ]
-          }
+            iceServers,
+            iceCandidatePoolSize: 10
+          },
+          debug: 2
         }
-        
+
         let p: any
         if (isHost) {
-          p = new Peer(roomId, config)
-          setStatus('Waiting for partner...')
+          p = new Peer(roomId, peerConfig)
+          log(`Creating peer as HOST with ID: ${roomId}`)
         } else {
-          p = new Peer(config)
-          setStatus('Connecting to partner...')
+          p = new Peer(peerConfig)
+          log('Creating peer as GUEST')
         }
-        
+
         peerRef.current = p
-        setPeer(p)
-        
+
         p.on('open', (id: string) => {
-          if (!mounted) return
-          console.log('Peer connected with ID:', id)
-          
-          if (!isHost) {
+          if (!mountedRef.current) return
+          log(`Peer connected with ID: ${id}`)
+
+          if (isHost) {
+            setStatus('waiting')
+            setStatusMessage('Waiting for partner to connect...')
+          } else {
+            setStatus('connecting')
+            setStatusMessage('Connecting to partner...')
+
             setTimeout(() => {
-              if (!mounted) return
-              console.log('Guest connecting to host:', roomId)
+              if (!mountedRef.current || !peerRef.current) return
+              log(`Guest connecting to host: ${roomId}`)
               const connection = p.connect(roomId, { reliable: true })
               setupConnection(connection)
             }, 1000)
           }
         })
-        
+
         p.on('connection', (connection: any) => {
-          if (!mounted) return
-          console.log('Incoming connection from peer')
+          if (!mountedRef.current) return
+          log('Incoming connection from peer')
           setupConnection(connection)
         })
-        
+
         p.on('error', (err: any) => {
-          console.error('Peer error:', err)
-          setStatus(`Error: ${err.type}`)
+          log(`Peer error: ${err.type} - ${err.message || err}`)
+
+          if (err.type === 'peer-unavailable') {
+            setStatusMessage('Partner not found. Make sure they have the room open.')
+          } else if (err.type === 'unavailable-id') {
+            setStatusMessage('Room already in use. Try a different link.')
+          } else {
+            setStatusMessage(`Connection error: ${err.type}`)
+          }
+          setStatus('error')
         })
-        
+
+        p.on('disconnected', () => {
+          log('Peer disconnected')
+          if (mountedRef.current && isConnected) {
+            p.reconnect()
+          }
+        })
+
       } catch (err) {
-        console.error('Init error:', err)
-        setStatus('Failed to initialize')
+        log(`Init error: ${err}`)
+        setStatusMessage('Failed to initialize connection')
+        setStatus('error')
       }
     }
-    
+
     const setupConnection = (connection: any) => {
       connRef.current = connection
-      setConn(connection)
-      
+
       connection.on('open', () => {
-        console.log('Data connection open')
-        setStatus('Connected ✓')
+        if (!mountedRef.current) return
+        log('Data connection established')
+        setStatus('connected')
+        setStatusMessage('Connected!')
         setIsConnected(true)
       })
-      
+
       connection.on('data', (data: any) => {
-        console.log('Received data:', data)
+        if (!mountedRef.current) return
+        log(`Received: ${data.type}`)
         if (data.type === 'speech') {
           setPartnerText(data.text)
         } else if (data.type === 'translation') {
           setPartnerTranslation(data.text)
         }
       })
-      
+
       connection.on('close', () => {
-        console.log('Connection closed')
-        setStatus('Disconnected')
+        if (!mountedRef.current) return
+        log('Connection closed')
+        setStatusMessage('Partner disconnected')
         setIsConnected(false)
+        setStatus('error')
       })
-      
+
       connection.on('error', (err: any) => {
-        console.error('Connection error:', err)
-        setStatus('Connection error')
+        log(`Connection error: ${err}`)
+        setStatusMessage('Connection error')
+        setStatus('error')
       })
     }
-    
+
     init()
-    
+
     return () => {
-      mounted = false
+      mountedRef.current = false
       if (recognitionRef.current) {
         try { recognitionRef.current.stop() } catch {}
       }
       if (peerRef.current) {
-        peerRef.current.destroy()
+        try { peerRef.current.destroy() } catch {}
       }
     }
-  }, [roomId, isHost])
-  
+  }, [roomId, isHost, log])
+
   // Send data to partner
-  const sendToPartner = (type: string, text: string) => {
+  const sendToPartner = useCallback((type: string, text: string) => {
     if (connRef.current && connRef.current.open) {
       connRef.current.send({ type, text })
-      console.log('Sent:', type, text.substring(0, 50))
+      log(`Sent ${type}: ${text.substring(0, 30)}...`)
     }
-  }
-  
+  }, [log])
+
   // Translate text
-  const translate = async (text: string) => {
+  const translate = useCallback(async (text: string) => {
     if (!text.trim()) return
-    
+
     try {
       const res = await fetch('/api/translate', {
         method: 'POST',
@@ -162,40 +228,40 @@ export default function FaceToFace() {
           targetLang: partnerLang
         })
       })
-      
+
       const data = await res.json()
       if (data.translation) {
         setMyTranslation(data.translation)
         sendToPartner('translation', data.translation)
       }
     } catch (err) {
-      console.error('Translation error:', err)
+      log(`Translation error: ${err}`)
     }
-  }
-  
+  }, [userLang, partnerLang, sendToPartner, log])
+
   // Start listening
-  const startListening = () => {
+  const startListening = useCallback(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SpeechRecognition) {
       alert('Speech recognition requires Chrome or Edge browser')
       return
     }
-    
+
     if (!isConnected) {
       alert('Wait for partner to connect first')
       return
     }
-    
+
     const recognition = new SpeechRecognition()
     recognition.continuous = true
     recognition.interimResults = true
     recognition.lang = userLang === 'en' ? 'en-US' : 'es-ES'
-    
+
     finalTranscriptRef.current = ''
-    
+
     recognition.onresult = (event: any) => {
       let interim = ''
-      
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const transcript = event.results[i][0].transcript
         if (event.results[i].isFinal) {
@@ -208,49 +274,66 @@ export default function FaceToFace() {
           interim = transcript
         }
       }
-      
+
       const display = finalTranscriptRef.current + interim
       setMyText(display)
     }
-    
+
     recognition.onerror = (event: any) => {
-      console.error('Speech error:', event.error)
+      log(`Speech error: ${event.error}`)
       if (event.error === 'not-allowed') {
-        alert('Microphone permission denied')
+        alert('Microphone permission denied. Please allow access.')
       }
     }
-    
+
     recognition.onend = () => {
-      if (isListening) {
+      if (isListeningRef.current && mountedRef.current) {
         try { recognition.start() } catch {}
       }
     }
-    
+
     recognitionRef.current = recognition
     recognition.start()
     setIsListening(true)
-  }
-  
-  const stopListening = () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop()
-    }
+  }, [isConnected, userLang, sendToPartner, translate, log])
+
+  const stopListening = useCallback(() => {
     setIsListening(false)
-  }
-  
-  const clearAll = () => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop() } catch {}
+    }
+  }, [])
+
+  const clearAll = useCallback(() => {
     setMyText('')
     setMyTranslation('')
     finalTranscriptRef.current = ''
-  }
-  
-  const copyJoinLink = () => {
-    const link = `${window.location.origin}/talk/${roomId}?host=false&name=Partner&lang=${partnerLang}`
-    navigator.clipboard.writeText(link).then(() => {
-      alert('Join link copied to clipboard!')
-    }).catch(() => {
+  }, [])
+
+  const getJoinLink = useCallback(() => {
+    if (typeof window === 'undefined') return ''
+    return `${window.location.origin}/talk/${roomId}?host=false&name=Partner&lang=${partnerLang}`
+  }, [roomId, partnerLang])
+
+  const copyJoinLink = useCallback(async () => {
+    const link = getJoinLink()
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopySuccess(true)
+      setTimeout(() => setCopySuccess(false), 2000)
+    } catch {
       prompt('Copy this link:', link)
-    })
+    }
+  }, [getJoinLink])
+
+  const getStatusColor = () => {
+    switch (status) {
+      case 'connected': return 'bg-green-500'
+      case 'connecting':
+      case 'waiting': return 'bg-yellow-500'
+      case 'error': return 'bg-red-500'
+      default: return 'bg-gray-500'
+    }
   }
 
   return (
@@ -264,24 +347,56 @@ export default function FaceToFace() {
           >
             ← Back
           </button>
-          
+
           <div className="text-center">
-            <div className="text-sm text-gray-500">Room: {roomId}</div>
+            <div className="flex items-center justify-center gap-2 mb-1">
+              <div className={`w-3 h-3 rounded-full ${getStatusColor()} ${status === 'connecting' || status === 'waiting' ? 'animate-pulse' : ''}`} />
+              <span className="text-sm text-gray-400">Room: {roomId}</span>
+            </div>
             <div className={`text-lg font-semibold ${isConnected ? 'text-green-400' : 'text-yellow-400'}`}>
-              {status}
+              {statusMessage}
             </div>
           </div>
-          
+
           {isHost && !isConnected && (
             <button
               onClick={copyJoinLink}
-              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-white transition"
+              className={`px-4 py-2 rounded-lg text-white transition ${
+                copySuccess ? 'bg-green-600' : 'bg-cyan-600 hover:bg-cyan-700'
+              }`}
             >
-              📋 Copy Link
+              {copySuccess ? '✓ Copied!' : '📋 Copy Link'}
             </button>
           )}
+
+          {(!isHost || isConnected) && <div className="w-24" />}
         </div>
       </div>
+
+      {/* Share Link Panel (Host only, when waiting) */}
+      {isHost && !isConnected && (
+        <div className="max-w-6xl mx-auto mb-6">
+          <div className="bg-gray-800/50 rounded-xl p-4">
+            <p className="text-sm text-gray-400 mb-2">Share this link with the person you want to talk with:</p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                readOnly
+                value={getJoinLink()}
+                className="flex-1 bg-gray-700 rounded px-3 py-2 text-sm text-white"
+              />
+              <button
+                onClick={copyJoinLink}
+                className={`px-4 py-2 rounded font-medium transition-colors ${
+                  copySuccess ? 'bg-green-600' : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {copySuccess ? '✓ Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <div className="max-w-6xl mx-auto">
@@ -299,14 +414,14 @@ export default function FaceToFace() {
                 </div>
               )}
             </div>
-            
+
             <div className="mb-4 min-h-[120px]">
               <div className="text-sm text-gray-400 mb-2">What you said:</div>
               <div className="text-white text-lg leading-relaxed">
                 {myText || <span className="text-gray-600 italic">Speak to see text here...</span>}
               </div>
             </div>
-            
+
             <div className="pt-4 border-t border-gray-700 min-h-[100px]">
               <div className="text-sm text-green-400 mb-2">Translation to {partnerLang === 'en' ? 'English' : 'Español'}:</div>
               <div className="text-green-300 text-lg leading-relaxed">
@@ -320,14 +435,14 @@ export default function FaceToFace() {
             <h3 className="text-xl font-bold text-purple-400 mb-4">
               Partner - {partnerLang === 'en' ? 'English 🇺🇸' : 'Español 🇪🇸'}
             </h3>
-            
+
             <div className="mb-4 min-h-[120px]">
               <div className="text-sm text-gray-400 mb-2">What they said:</div>
               <div className="text-white text-lg leading-relaxed">
-                {partnerText || <span className="text-gray-600 italic">Waiting for partner...</span>}
+                {partnerText || <span className="text-gray-600 italic">{isConnected ? 'Waiting for partner to speak...' : 'Partner not connected yet...'}</span>}
               </div>
             </div>
-            
+
             <div className="pt-4 border-t border-gray-700 min-h-[100px]">
               <div className="text-sm text-green-400 mb-2">Translation to {userLang === 'en' ? 'English' : 'Español'}:</div>
               <div className="text-green-300 text-lg leading-relaxed">
@@ -367,6 +482,11 @@ export default function FaceToFace() {
               </button>
             </>
           )}
+        </div>
+
+        {/* Room Info */}
+        <div className="mt-6 text-center text-xs text-gray-500">
+          Room: {roomId} • {isHost ? 'Host' : 'Guest'} • {userLang.toUpperCase()} → {partnerLang.toUpperCase()}
         </div>
       </div>
     </div>
